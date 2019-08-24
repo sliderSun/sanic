@@ -10,10 +10,8 @@
 import os
 import sys
 
-# Add support for Markdown documentation using Recommonmark
-from recommonmark.parser import CommonMarkParser
-
 # Add support for auto-doc
+import recommonmark
 from recommonmark.transform import AutoStructify
 
 # Ensure that sanic is present in the path, to allow sphinx-apidoc to
@@ -25,12 +23,11 @@ import sanic
 
 # -- General configuration ------------------------------------------------
 
-extensions = ['sphinx.ext.autodoc']
+extensions = ['sphinx.ext.autodoc', "recommonmark"]
 
 templates_path = ['_templates']
 
 # Enable support for both Restructured Text and Markdown
-source_parsers = {'.md': CommonMarkParser}
 source_suffix = ['.rst', '.md']
 
 # The master toctree document.
@@ -38,7 +35,7 @@ master_doc = 'index'
 
 # General information about the project.
 project = 'Sanic'
-copyright = '2016, Sanic contributors'
+copyright = '2018, Sanic contributors'
 author = 'Sanic contributors'
 
 # The version info for the project you're documenting, acts as replacement for
@@ -149,6 +146,6 @@ suppress_warnings = ['image.nonlocal_uri']
 def setup(app):
     app.add_config_value('recommonmark_config', {
         'enable_eval_rst': True,
-        'enable_auto_doc_ref': True,
+        'enable_auto_doc_ref': False,
     }, True)
     app.add_transform(AutoStructify)

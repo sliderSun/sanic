@@ -55,10 +55,12 @@ from sanic import response
 @app.route("/streaming")
 async def index(request):
     async def streaming_fn(response):
-        response.write('foo')
-        response.write('bar')
+        await response.write('foo')
+        await response.write('bar')
     return response.stream(streaming_fn, content_type='text/plain')
 ```
+
+See [Streaming](streaming.md) for more information.
 
 ## File Streaming
 For large files, a combination of File and Streaming above
@@ -91,7 +93,7 @@ from sanic import response
 
 @app.route('/raw')
 def handle_request(request):
-    return response.raw('raw data')
+    return response.raw(b'raw data')
 ```
 
 ## Modify headers or status

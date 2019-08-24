@@ -1,33 +1,88 @@
-import time
+import asyncio
 import json
 import shlex
 import subprocess
+import time
 import urllib.request
+
 from unittest import mock
-from sanic.worker import GunicornWorker
-from sanic.app import Sanic
-import asyncio
-import logging
+
 import pytest
 
+from sanic.app import Sanic
+from sanic.worker import GunicornWorker
 
-@pytest.fixture(scope='module')
+
+@pytest.fixture(scope="module")
 def gunicorn_worker():
-    command = 'gunicorn --bind 127.0.0.1:1337 --worker-class sanic.worker.GunicornWorker examples.simple_server:app'
+    command = (
+        "gunicorn "
+        "--bind 127.0.0.1:1337 "
+        "--worker-class sanic.worker.GunicornWorker "
+        "examples.simple_server:app"
+    )
     worker = subprocess.Popen(shlex.split(command))
     time.sleep(3)
     yield
     worker.kill()
 
 
+@pytest.fixture(scope="module")
+def gunicorn_worker_with_access_logs():
+    command = (
+        "gunicorn "
+        "--bind 127.0.0.1:1338 "
+        "--worker-class sanic.worker.GunicornWorker "
+        "examples.simple_server:app"
+    )
+    worker = subprocess.Popen(shlex.split(command), stdout=subprocess.PIPE)
+    time.sleep(2)
+    return worker
+
+
+@pytest.fixture(scope="module")
+def gunicorn_worker_with_env_var():
+    command = (
+        'env SANIC_ACCESS_LOG="False" '
+        "gunicorn "
+        "--bind 127.0.0.1:1339 "
+        "--worker-class sanic.worker.GunicornWorker "
+        "--log-level info "
+        "examples.simple_server:app"
+    )
+    worker = subprocess.Popen(shlex.split(command), stdout=subprocess.PIPE)
+    time.sleep(2)
+    return worker
+
+
 def test_gunicorn_worker(gunicorn_worker):
-    with urllib.request.urlopen('http://localhost:1337/') as f:
+    with urllib.request.urlopen("http://localhost:1337/") as f:
         res = json.loads(f.read(100).decode())
-    assert res['test']
+    assert res["test"]
+
+
+def test_gunicorn_worker_no_logs(gunicorn_worker_with_env_var):
+    """
+    if SANIC_ACCESS_LOG was set to False do not show access logs
+    """
+    with urllib.request.urlopen("http://localhost:1339/") as _:
+        gunicorn_worker_with_env_var.kill()
+        assert not gunicorn_worker_with_env_var.stdout.read()
+
+
+def test_gunicorn_worker_with_logs(gunicorn_worker_with_access_logs):
+    """
+    default - show access logs
+    """
+    with urllib.request.urlopen("http://localhost:1338/") as _:
+        gunicorn_worker_with_access_logs.kill()
+        assert (
+            b"(sanic.access)[INFO][127.0.0.1"
+            in gunicorn_worker_with_access_logs.stdout.read()
+        )
 
 
 class GunicornTestWorker(GunicornWorker):
-
     def __init__(self):
         self.app = mock.Mock()
         self.app.callable = Sanic("test_gunicorn_worker")
@@ -43,7 +98,7 @@ def worker():
 
 
 def test_worker_init_process(worker):
-    with mock.patch('sanic.worker.asyncio') as mock_asyncio:
+    with mock.patch("sanic.worker.asyncio") as mock_asyncio:
         try:
             worker.init_process()
         except TypeError:
@@ -61,7 +116,7 @@ def test_worker_init_signals(worker):
 
 
 def test_handle_abort(worker):
-    with mock.patch('sanic.worker.sys') as mock_sys:
+    with mock.patch("sanic.worker.sys") as mock_sys:
         worker.handle_abort(object(), object())
         assert not worker.alive
         assert worker.exit_code == 1
@@ -79,7 +134,7 @@ def test_run_max_requests_exceeded(worker):
     worker.ppid = 1
     worker.alive = True
     sock = mock.Mock()
-    sock.cfg_addr = ('localhost', 8080)
+    sock.cfg_addr = ("localhost", 8080)
     worker.sockets = [sock]
     worker.wsgi = mock.Mock()
     worker.connections = set()
@@ -96,10 +151,12 @@ def test_run_max_requests_exceeded(worker):
     _runner = asyncio.ensure_future(worker._check_alive(), loop=loop)
     loop.run_until_complete(_runner)
 
-    assert worker.alive == False
+    assert not worker.alive
     worker.notify.assert_called_with()
-    worker.log.info.assert_called_with("Max requests exceeded, shutting down: %s",
-                                       worker)
+    worker.log.info.assert_called_with(
+        "Max requests exceeded, shutting " "down: %s", worker
+    )
+
 
 def test_worker_close(worker):
     loop = asyncio.new_event_loop()
@@ -113,23 +170,23 @@ def test_worker_close(worker):
     conn = mock.Mock()
     conn.websocket = mock.Mock()
     conn.websocket.close_connection = mock.Mock(
-            wraps=asyncio.coroutine(lambda *a, **kw: None)
-        )
+        wraps=asyncio.coroutine(lambda *a, **kw: None)
+    )
     worker.connections = set([conn])
     worker.log = mock.Mock()
     worker.loop = loop
     server = mock.Mock()
     server.close = mock.Mock(wraps=lambda *a, **kw: None)
-    server.wait_closed = mock.Mock(wraps=asyncio.coroutine(lambda *a, **kw: None))
-    worker.servers = {
-        server: {"requests_count": 14},
-    }
+    server.wait_closed = mock.Mock(
+        wraps=asyncio.coroutine(lambda *a, **kw: None)
+    )
+    worker.servers = {server: {"requests_count": 14}}
     worker.max_requests = 10
 
     # close worker
     _close = asyncio.ensure_future(worker.close(), loop=loop)
     loop.run_until_complete(_close)
 
-    assert worker.signal.stopped == True
-    conn.websocket.close_connection.assert_called_with(force=True)
+    assert worker.signal.stopped
+    assert conn.websocket.close_connection.called
     assert len(worker.servers) == 0

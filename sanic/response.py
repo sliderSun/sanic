@@ -1,80 +1,23 @@
+from functools import partial
 from mimetypes import guess_type
 from os import path
-
-try:
-    from ujson import dumps as json_dumps
-except:
-    from json import dumps as json_dumps
+from urllib.parse import quote_plus
 
 from aiofiles import open as open_async
 
+from sanic.compat import Header
 from sanic.cookies import CookieJar
+from sanic.helpers import STATUS_CODES, has_message_body, remove_entity_headers
 
-COMMON_STATUS_CODES = {
-    200: b'OK',
-    400: b'Bad Request',
-    404: b'Not Found',
-    500: b'Internal Server Error',
-}
-ALL_STATUS_CODES = {
-    100: b'Continue',
-    101: b'Switching Protocols',
-    102: b'Processing',
-    200: b'OK',
-    201: b'Created',
-    202: b'Accepted',
-    203: b'Non-Authoritative Information',
-    204: b'No Content',
-    205: b'Reset Content',
-    206: b'Partial Content',
-    207: b'Multi-Status',
-    208: b'Already Reported',
-    226: b'IM Used',
-    300: b'Multiple Choices',
-    301: b'Moved Permanently',
-    302: b'Found',
-    303: b'See Other',
-    304: b'Not Modified',
-    305: b'Use Proxy',
-    307: b'Temporary Redirect',
-    308: b'Permanent Redirect',
-    400: b'Bad Request',
-    401: b'Unauthorized',
-    402: b'Payment Required',
-    403: b'Forbidden',
-    404: b'Not Found',
-    405: b'Method Not Allowed',
-    406: b'Not Acceptable',
-    407: b'Proxy Authentication Required',
-    408: b'Request Timeout',
-    409: b'Conflict',
-    410: b'Gone',
-    411: b'Length Required',
-    412: b'Precondition Failed',
-    413: b'Request Entity Too Large',
-    414: b'Request-URI Too Long',
-    415: b'Unsupported Media Type',
-    416: b'Requested Range Not Satisfiable',
-    417: b'Expectation Failed',
-    422: b'Unprocessable Entity',
-    423: b'Locked',
-    424: b'Failed Dependency',
-    426: b'Upgrade Required',
-    428: b'Precondition Required',
-    429: b'Too Many Requests',
-    431: b'Request Header Fields Too Large',
-    500: b'Internal Server Error',
-    501: b'Not Implemented',
-    502: b'Bad Gateway',
-    503: b'Service Unavailable',
-    504: b'Gateway Timeout',
-    505: b'HTTP Version Not Supported',
-    506: b'Variant Also Negotiates',
-    507: b'Insufficient Storage',
-    508: b'Loop Detected',
-    510: b'Not Extended',
-    511: b'Network Authentication Required'
-}
+
+try:
+    from ujson import dumps as json_dumps
+except BaseException:
+    from json import dumps
+
+    # This is done in order to ensure that the JSON response is
+    # kept consistent across both ujson and inbuilt json usage.
+    json_dumps = partial(dumps, separators=(",", ":"))
 
 
 class BaseHTTPResponse:
@@ -87,16 +30,18 @@ class BaseHTTPResponse:
             return str(data).encode()
 
     def _parse_headers(self):
-        headers = b''
+        headers = b""
         for name, value in self.headers.items():
             try:
-                headers += (
-                    b'%b: %b\r\n' % (
-                        name.encode(), value.encode('utf-8')))
+                headers += b"%b: %b\r\n" % (
+                    name.encode(),
+                    value.encode("utf-8"),
+                )
             except AttributeError:
-                headers += (
-                    b'%b: %b\r\n' % (
-                        str(name).encode(), str(value).encode('utf-8')))
+                headers += b"%b: %b\r\n" % (
+                    str(name).encode(),
+                    str(value).encode("utf-8"),
+                )
 
         return headers
 
@@ -109,18 +54,31 @@ class BaseHTTPResponse:
 
 class StreamingHTTPResponse(BaseHTTPResponse):
     __slots__ = (
-        'transport', 'streaming_fn',
-        'status', 'content_type', 'headers', '_cookies')
+        "protocol",
+        "streaming_fn",
+        "status",
+        "content_type",
+        "headers",
+        "chunked",
+        "_cookies",
+    )
 
-    def __init__(self, streaming_fn, status=200, headers=None,
-                 content_type='text/plain'):
+    def __init__(
+        self,
+        streaming_fn,
+        status=200,
+        headers=None,
+        content_type="text/plain",
+        chunked=True,
+    ):
         self.content_type = content_type
         self.streaming_fn = streaming_fn
         self.status = status
-        self.headers = headers or {}
+        self.headers = Header(headers or {})
+        self.chunked = chunked
         self._cookies = None
 
-    def write(self, data):
+    async def write(self, data):
         """Writes a chunk of data to the streaming response.
 
         :param data: bytes-ish data to be written.
@@ -128,59 +86,76 @@ class StreamingHTTPResponse(BaseHTTPResponse):
         if type(data) != bytes:
             data = self._encode_body(data)
 
-        self.transport.write(
-            b"%x\r\n%b\r\n" % (len(data), data))
+        if self.chunked:
+            await self.protocol.push_data(b"%x\r\n%b\r\n" % (len(data), data))
+        else:
+            await self.protocol.push_data(data)
+        await self.protocol.drain()
 
     async def stream(
-            self, version="1.1", keep_alive=False, keep_alive_timeout=None):
+        self, version="1.1", keep_alive=False, keep_alive_timeout=None
+    ):
         """Streams headers, runs the `streaming_fn` callback that writes
         content to the response body, then finalizes the response body.
         """
+        if version != "1.1":
+            self.chunked = False
         headers = self.get_headers(
-            version, keep_alive=keep_alive,
-            keep_alive_timeout=keep_alive_timeout)
-        self.transport.write(headers)
-
+            version,
+            keep_alive=keep_alive,
+            keep_alive_timeout=keep_alive_timeout,
+        )
+        await self.protocol.push_data(headers)
+        await self.protocol.drain()
         await self.streaming_fn(self)
-        self.transport.write(b'0\r\n\r\n')
+        if self.chunked:
+            await self.protocol.push_data(b"0\r\n\r\n")
+        # no need to await drain here after this write, because it is the
+        # very last thing we write and nothing needs to wait for it.
 
     def get_headers(
-            self, version="1.1", keep_alive=False, keep_alive_timeout=None):
+        self, version="1.1", keep_alive=False, keep_alive_timeout=None
+    ):
         # This is all returned in a kind-of funky way
         # We tried to make this as fast as possible in pure python
-        timeout_header = b''
+        timeout_header = b""
         if keep_alive and keep_alive_timeout is not None:
-            timeout_header = b'Keep-Alive: %d\r\n' % keep_alive_timeout
+            timeout_header = b"Keep-Alive: %d\r\n" % keep_alive_timeout
 
-        self.headers['Transfer-Encoding'] = 'chunked'
-        self.headers.pop('Content-Length', None)
-        self.headers['Content-Type'] = self.headers.get(
-            'Content-Type', self.content_type)
+        if self.chunked and version == "1.1":
+            self.headers["Transfer-Encoding"] = "chunked"
+            self.headers.pop("Content-Length", None)
+        self.headers["Content-Type"] = self.headers.get(
+            "Content-Type", self.content_type
+        )
 
         headers = self._parse_headers()
 
-        # Try to pull from the common codes first
-        # Speeds up response rate 6% over pulling from all
-        status = COMMON_STATUS_CODES.get(self.status)
-        if not status:
-            status = ALL_STATUS_CODES.get(self.status)
+        if self.status == 200:
+            status = b"OK"
+        else:
+            status = STATUS_CODES.get(self.status)
 
-        return (b'HTTP/%b %d %b\r\n'
-                b'%b'
-                b'%b\r\n') % (
-                   version.encode(),
-                   self.status,
-                   status,
-                   timeout_header,
-                   headers
-               )
+        return (b"HTTP/%b %d %b\r\n" b"%b" b"%b\r\n") % (
+            version.encode(),
+            self.status,
+            status,
+            timeout_header,
+            headers,
+        )
 
 
 class HTTPResponse(BaseHTTPResponse):
-    __slots__ = ('body', 'status', 'content_type', 'headers', '_cookies')
+    __slots__ = ("body", "status", "content_type", "headers", "_cookies")
 
-    def __init__(self, body=None, status=200, headers=None,
-                 content_type='text/plain', body_bytes=b''):
+    def __init__(
+        self,
+        body=None,
+        status=200,
+        headers=None,
+        content_type="text/plain",
+        body_bytes=b"",
+    ):
         self.content_type = content_type
 
         if body is not None:
@@ -189,42 +164,48 @@ class HTTPResponse(BaseHTTPResponse):
             self.body = body_bytes
 
         self.status = status
-        self.headers = headers or {}
+        self.headers = Header(headers or {})
         self._cookies = None
 
-    def output(
-            self, version="1.1", keep_alive=False, keep_alive_timeout=None):
+    def output(self, version="1.1", keep_alive=False, keep_alive_timeout=None):
         # This is all returned in a kind-of funky way
         # We tried to make this as fast as possible in pure python
-        timeout_header = b''
+        timeout_header = b""
         if keep_alive and keep_alive_timeout is not None:
-            timeout_header = b'Keep-Alive: %d\r\n' % keep_alive_timeout
-        self.headers['Content-Length'] = self.headers.get(
-            'Content-Length', len(self.body))
-        self.headers['Content-Type'] = self.headers.get(
-            'Content-Type', self.content_type)
+            timeout_header = b"Keep-Alive: %d\r\n" % keep_alive_timeout
+
+        body = b""
+        if has_message_body(self.status):
+            body = self.body
+            self.headers["Content-Length"] = self.headers.get(
+                "Content-Length", len(self.body)
+            )
+
+        self.headers["Content-Type"] = self.headers.get(
+            "Content-Type", self.content_type
+        )
+
+        if self.status in (304, 412):
+            self.headers = remove_entity_headers(self.headers)
 
         headers = self._parse_headers()
 
-        # Try to pull from the common codes first
-        # Speeds up response rate 6% over pulling from all
-        status = COMMON_STATUS_CODES.get(self.status)
-        if not status:
-            status = ALL_STATUS_CODES.get(self.status, b'UNKNOWN RESPONSE')
+        if self.status == 200:
+            status = b"OK"
+        else:
+            status = STATUS_CODES.get(self.status, b"UNKNOWN RESPONSE")
 
-        return (b'HTTP/%b %d %b\r\n'
-                b'Connection: %b\r\n'
-                b'%b'
-                b'%b\r\n'
-                b'%b') % (
-                   version.encode(),
-                   self.status,
-                   status,
-                   b'keep-alive' if keep_alive else b'close',
-                   timeout_header,
-                   headers,
-                   self.body
-               )
+        return (
+            b"HTTP/%b %d %b\r\n" b"Connection: %b\r\n" b"%b" b"%b\r\n" b"%b"
+        ) % (
+            version.encode(),
+            self.status,
+            status,
+            b"keep-alive" if keep_alive else b"close",
+            timeout_header,
+            headers,
+            body,
+        )
 
     @property
     def cookies(self):
@@ -233,8 +214,14 @@ class HTTPResponse(BaseHTTPResponse):
         return self._cookies
 
 
-def json(body, status=200, headers=None,
-         content_type="application/json", **kwargs):
+def json(
+    body,
+    status=200,
+    headers=None,
+    content_type="application/json",
+    dumps=json_dumps,
+    **kwargs
+):
     """
     Returns response object with body in json format.
 
@@ -243,12 +230,17 @@ def json(body, status=200, headers=None,
     :param headers: Custom Headers.
     :param kwargs: Remaining arguments that are passed to the json encoder.
     """
-    return HTTPResponse(json_dumps(body, **kwargs), headers=headers,
-                        status=status, content_type=content_type)
+    return HTTPResponse(
+        dumps(body, **kwargs),
+        headers=headers,
+        status=status,
+        content_type=content_type,
+    )
 
 
-def text(body, status=200, headers=None,
-         content_type="text/plain; charset=utf-8"):
+def text(
+    body, status=200, headers=None, content_type="text/plain; charset=utf-8"
+):
     """
     Returns response object with body in text format.
 
@@ -258,12 +250,13 @@ def text(body, status=200, headers=None,
     :param content_type: the content type (string) of the response
     """
     return HTTPResponse(
-        body, status=status, headers=headers,
-        content_type=content_type)
+        body, status=status, headers=headers, content_type=content_type
+    )
 
 
-def raw(body, status=200, headers=None,
-        content_type="application/octet-stream"):
+def raw(
+    body, status=200, headers=None, content_type="application/octet-stream"
+):
     """
     Returns response object without encoding the body.
 
@@ -272,8 +265,12 @@ def raw(body, status=200, headers=None,
     :param headers: Custom Headers.
     :param content_type: the content type (string) of the response.
     """
-    return HTTPResponse(body_bytes=body, status=status, headers=headers,
-                        content_type=content_type)
+    return HTTPResponse(
+        body_bytes=body,
+        status=status,
+        headers=headers,
+        content_type=content_type,
+    )
 
 
 def html(body, status=200, headers=None):
@@ -284,50 +281,87 @@ def html(body, status=200, headers=None):
     :param status: Response code.
     :param headers: Custom Headers.
     """
-    return HTTPResponse(body, status=status, headers=headers,
-                        content_type="text/html; charset=utf-8")
+    return HTTPResponse(
+        body,
+        status=status,
+        headers=headers,
+        content_type="text/html; charset=utf-8",
+    )
 
 
-async def file(location, mime_type=None, headers=None, _range=None):
+async def file(
+    location,
+    status=200,
+    mime_type=None,
+    headers=None,
+    filename=None,
+    _range=None,
+):
     """Return a response object with file data.
 
     :param location: Location of file on system.
     :param mime_type: Specific mime_type.
     :param headers: Custom Headers.
+    :param filename: Override filename.
     :param _range:
     """
-    filename = path.split(location)[-1]
+    headers = headers or {}
+    if filename:
+        headers.setdefault(
+            "Content-Disposition", 'attachment; filename="{}"'.format(filename)
+        )
+    filename = filename or path.split(location)[-1]
 
-    async with open_async(location, mode='rb') as _file:
+    async with open_async(location, mode="rb") as _file:
         if _range:
             await _file.seek(_range.start)
             out_stream = await _file.read(_range.size)
-            headers['Content-Range'] = 'bytes %s-%s/%s' % (
-                _range.start, _range.end, _range.total)
+            headers["Content-Range"] = "bytes %s-%s/%s" % (
+                _range.start,
+                _range.end,
+                _range.total,
+            )
+            status = 206
         else:
             out_stream = await _file.read()
 
-    mime_type = mime_type or guess_type(filename)[0] or 'text/plain'
+    mime_type = mime_type or guess_type(filename)[0] or "text/plain"
+    return HTTPResponse(
+        status=status,
+        headers=headers,
+        content_type=mime_type,
+        body_bytes=out_stream,
+    )
 
-    return HTTPResponse(status=200,
-                        headers=headers,
-                        content_type=mime_type,
-                        body_bytes=out_stream)
 
-
-async def file_stream(location, chunk_size=4096, mime_type=None, headers=None,
-                      _range=None):
+async def file_stream(
+    location,
+    status=200,
+    chunk_size=4096,
+    mime_type=None,
+    headers=None,
+    filename=None,
+    chunked=True,
+    _range=None,
+):
     """Return a streaming response object with file data.
 
     :param location: Location of file on system.
     :param chunk_size: The size of each chunk in the stream (in bytes)
     :param mime_type: Specific mime_type.
     :param headers: Custom Headers.
+    :param filename: Override filename.
+    :param chunked: Enable or disable chunked transfer-encoding
     :param _range:
     """
-    filename = path.split(location)[-1]
+    headers = headers or {}
+    if filename:
+        headers.setdefault(
+            "Content-Disposition", 'attachment; filename="{}"'.format(filename)
+        )
+    filename = filename or path.split(location)[-1]
 
-    _file = await open_async(location, mode='rb')
+    _file = await open_async(location, mode="rb")
 
     async def _streaming_fn(response):
         nonlocal _file, chunk_size
@@ -341,30 +375,41 @@ async def file_stream(location, chunk_size=4096, mime_type=None, headers=None,
                     if len(content) < 1:
                         break
                     to_send -= len(content)
-                    response.write(content)
+                    await response.write(content)
             else:
                 while True:
                     content = await _file.read(chunk_size)
                     if len(content) < 1:
                         break
-                    response.write(content)
+                    await response.write(content)
         finally:
             await _file.close()
         return  # Returning from this fn closes the stream
 
-    mime_type = mime_type or guess_type(filename)[0] or 'text/plain'
+    mime_type = mime_type or guess_type(filename)[0] or "text/plain"
     if _range:
-        headers['Content-Range'] = 'bytes %s-%s/%s' % (
-            _range.start, _range.end, _range.total)
-    return StreamingHTTPResponse(streaming_fn=_streaming_fn,
-                                 status=200,
-                                 headers=headers,
-                                 content_type=mime_type)
+        headers["Content-Range"] = "bytes %s-%s/%s" % (
+            _range.start,
+            _range.end,
+            _range.total,
+        )
+        status = 206
+    return StreamingHTTPResponse(
+        streaming_fn=_streaming_fn,
+        status=status,
+        headers=headers,
+        content_type=mime_type,
+        chunked=chunked,
+    )
 
 
 def stream(
-        streaming_fn, status=200, headers=None,
-        content_type="text/plain; charset=utf-8"):
+    streaming_fn,
+    status=200,
+    headers=None,
+    content_type="text/plain; charset=utf-8",
+    chunked=True,
+):
     """Accepts an coroutine `streaming_fn` which can be used to
     write chunks to a streaming response. Returns a `StreamingHTTPResponse`.
 
@@ -382,17 +427,20 @@ def stream(
         writes content to that response.
     :param mime_type: Specific mime_type.
     :param headers: Custom Headers.
+    :param chunked: Enable or disable chunked transfer-encoding
     """
     return StreamingHTTPResponse(
         streaming_fn,
         headers=headers,
         content_type=content_type,
-        status=status
+        status=status,
+        chunked=chunked,
     )
 
 
-def redirect(to, headers=None, status=302,
-             content_type="text/html; charset=utf-8"):
+def redirect(
+    to, headers=None, status=302, content_type="text/html; charset=utf-8"
+):
     """Abort execution and cause a 302 redirect (by default).
 
     :param to: path or fully qualified URL to redirect to
@@ -403,10 +451,12 @@ def redirect(to, headers=None, status=302,
     """
     headers = headers or {}
 
+    # URL Quote the URL before redirecting
+    safe_to = quote_plus(to, safe=":/%#?&=@[]!$&'()*+,;")
+
     # According to RFC 7231, a relative URI is now permitted.
-    headers['Location'] = to
+    headers["Location"] = safe_to
 
     return HTTPResponse(
-        status=status,
-        headers=headers,
-        content_type=content_type)
+        status=status, headers=headers, content_type=content_type
+    )

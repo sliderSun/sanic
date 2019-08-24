@@ -1,6 +1,7 @@
-from sanic.response import ALL_STATUS_CODES, COMMON_STATUS_CODES
+from sanic.helpers import STATUS_CODES
 
-TRACEBACK_STYLE = '''
+
+TRACEBACK_STYLE = """
     <style>
         body {
             padding: 20px;
@@ -61,9 +62,9 @@ TRACEBACK_STYLE = '''
             font-size: 14px;
         }
     </style>
-'''
+"""
 
-TRACEBACK_WRAPPER_HTML = '''
+TRACEBACK_WRAPPER_HTML = """
     <html>
         <head>
             {style}
@@ -78,27 +79,27 @@ TRACEBACK_WRAPPER_HTML = '''
             </div>
         </body>
     </html>
-'''
+"""
 
-TRACEBACK_WRAPPER_INNER_HTML = '''
+TRACEBACK_WRAPPER_INNER_HTML = """
     <h1>{exc_name}</h1>
     <h3><code>{exc_value}</code></h3>
     <div class="tb-wrapper">
         <p class="tb-header">Traceback (most recent call last):</p>
         {frame_html}
     </div>
-'''
+"""
 
-TRACEBACK_BORDER = '''
+TRACEBACK_BORDER = """
     <div class="tb-border">
         <b><i>
             The above exception was the direct cause of the
             following exception:
         </i></b>
     </div>
-'''
+"""
 
-TRACEBACK_LINE_HTML = '''
+TRACEBACK_LINE_HTML = """
     <div class="frame-line">
         <p class="frame-descriptor">
             File {0.filename}, line <i>{0.lineno}</i>,
@@ -106,15 +107,15 @@ TRACEBACK_LINE_HTML = '''
         </p>
         <p class="frame-code"><code>{0.line}</code></p>
     </div>
-'''
+"""
 
-INTERNAL_SERVER_ERROR_HTML = '''
+INTERNAL_SERVER_ERROR_HTML = """
     <h1>Internal Server Error</h1>
     <p>
         The server encountered an internal error and cannot complete
         your request.
     </p>
-'''
+"""
 
 
 _sanic_exceptions = {}
@@ -122,17 +123,18 @@ _sanic_exceptions = {}
 
 def add_status_code(code):
     """
-    Decorator used for adding exceptions to _sanic_exceptions.
+    Decorator used for adding exceptions to :class:`SanicException`.
     """
+
     def class_decorator(cls):
         cls.status_code = code
         _sanic_exceptions[code] = cls
         return cls
+
     return class_decorator
 
 
 class SanicException(Exception):
-
     def __init__(self, message, status_code=None):
         super().__init__(message)
 
@@ -150,8 +152,26 @@ class InvalidUsage(SanicException):
     pass
 
 
+@add_status_code(405)
+class MethodNotSupported(SanicException):
+    def __init__(self, message, method, allowed_methods):
+        super().__init__(message)
+        self.headers = dict()
+        self.headers["Allow"] = ", ".join(allowed_methods)
+        if method in ["HEAD", "PATCH", "PUT", "DELETE"]:
+            self.headers["Content-Length"] = 0
+
+
 @add_status_code(500)
 class ServerError(SanicException):
+    pass
+
+
+@add_status_code(503)
+class ServiceUnavailable(SanicException):
+    """The server is currently unavailable (because it is overloaded or
+    down for maintenance). Generally, this is a temporary state."""
+
     pass
 
 
@@ -160,8 +180,6 @@ class URLBuildError(ServerError):
 
 
 class FileNotFound(NotFound):
-    pass
-
     def __init__(self, message, path, relative_url):
         super().__init__(message)
         self.path = path
@@ -170,6 +188,14 @@ class FileNotFound(NotFound):
 
 @add_status_code(408)
 class RequestTimeout(SanicException):
+    """The Web server (running the Web site) thinks that there has been too
+    long an interval of time between 1) the establishment of an IP
+    connection (socket) between the client and the server and
+    2) the receipt of any data on that socket, so the server has dropped
+    the connection. The socket connection has actually been lost - the Web
+    server has 'timed out' on that particular socket connection.
+    """
+
     pass
 
 
@@ -184,14 +210,17 @@ class HeaderNotFound(InvalidUsage):
 
 @add_status_code(416)
 class ContentRangeError(SanicException):
-    pass
-
     def __init__(self, message, content_range):
         super().__init__(message)
         self.headers = {
-            'Content-Type': 'text/plain',
-            "Content-Range": "bytes */%s" % (content_range.total,)
+            "Content-Type": "text/plain",
+            "Content-Range": "bytes */%s" % (content_range.total,),
         }
+
+
+@add_status_code(417)
+class HeaderExpectationFailed(SanicException):
+    pass
 
 
 @add_status_code(403)
@@ -203,50 +232,58 @@ class InvalidRangeType(ContentRangeError):
     pass
 
 
+class PyFileError(Exception):
+    def __init__(self, file):
+        super().__init__("could not execute config file %s", file)
+
+
 @add_status_code(401)
 class Unauthorized(SanicException):
     """
     Unauthorized exception (401 HTTP status code).
 
+    :param message: Message describing the exception.
+    :param status_code: HTTP Status code.
     :param scheme: Name of the authentication scheme to be used.
-    :param challenge: A dict containing values to add to the WWW-Authenticate
-        header that is generated. This is especially useful when dealing with
-        the Digest scheme. (optional)
+
+    When present, kwargs is used to complete the WWW-Authentication header.
 
     Examples::
 
         # With a Basic auth-scheme, realm MUST be present:
-        challenge = {"realm": "Restricted Area"}
-        raise Unauthorized("Auth required.", "Basic", challenge)
+        raise Unauthorized("Auth required.",
+                           scheme="Basic",
+                           realm="Restricted Area")
 
         # With a Digest auth-scheme, things are a bit more complicated:
-        challenge = {
-            "realm": "Restricted Area",
-            "qop": "auth, auth-int",
-            "algorithm": "MD5",
-            "nonce": "abcdef",
-            "opaque": "zyxwvu"
-        }
-        raise Unauthorized("Auth required.", "Digest", challenge)
+        raise Unauthorized("Auth required.",
+                           scheme="Digest",
+                           realm="Restricted Area",
+                           qop="auth, auth-int",
+                           algorithm="MD5",
+                           nonce="abcdef",
+                           opaque="zyxwvu")
 
-        # With a Bearer auth-scheme, realm is optional:
-        challenge = {"realm": "Restricted Area"}
-        raise Unauthorized("Auth required.", "Bearer", challenge)
+        # With a Bearer auth-scheme, realm is optional so you can write:
+        raise Unauthorized("Auth required.", scheme="Bearer")
+
+        # or, if you want to specify the realm:
+        raise Unauthorized("Auth required.",
+                           scheme="Bearer",
+                           realm="Restricted Area")
     """
-    pass
 
-    def __init__(self, message, scheme, challenge=None):
-        super().__init__(message)
+    def __init__(self, message, status_code=None, scheme=None, **kwargs):
+        super().__init__(message, status_code)
 
-        chal = ""
+        # if auth-scheme is specified, set "WWW-Authenticate" header
+        if scheme is not None:
+            values = ['{!s}="{!s}"'.format(k, v) for k, v in kwargs.items()]
+            challenge = ", ".join(values)
 
-        if challenge is not None:
-            values = ["{!s}={!r}".format(k, v) for k, v in challenge.items()]
-            chal = ', '.join(values)
-
-        self.headers = {
-            "WWW-Authenticate": "{} {}".format(scheme, chal).rstrip()
-        }
+            self.headers = {
+                "WWW-Authenticate": "{} {}".format(scheme, challenge).rstrip()
+            }
 
 
 def abort(status_code, message=None):
@@ -259,9 +296,8 @@ def abort(status_code, message=None):
                     in response.py for the given status code.
     """
     if message is None:
-        message = COMMON_STATUS_CODES.get(status_code,
-                                          ALL_STATUS_CODES.get(status_code))
+        message = STATUS_CODES.get(status_code)
         # These are stored as bytes in the STATUS_CODES dict
-        message = message.decode('utf8')
+        message = message.decode("utf8")
     sanic_exception = _sanic_exceptions.get(status_code, SanicException)
     raise sanic_exception(message=message, status_code=status_code)

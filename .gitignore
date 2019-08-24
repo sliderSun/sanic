@@ -14,3 +14,6 @@ settings.py
 docs/_build/
 docs/_api/
 build/*
+.DS_Store
+dist/*
+pip-wheel-metadata/

@@ -1,9 +1,15 @@
-import os
-import sys
-import signal
 import asyncio
 import logging
+import os
+import signal
+import sys
 import traceback
+
+import gunicorn.workers.base as base
+
+from sanic.server import HttpProtocol, Signal, serve, trigger_events
+from sanic.websocket import WebSocketProtocol
+
 
 try:
     import ssl
@@ -12,16 +18,16 @@ except ImportError:
 
 try:
     import uvloop
+
     asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 except ImportError:
     pass
-import gunicorn.workers.base as base
-
-from sanic.server import trigger_events, serve, HttpProtocol, Signal
-from sanic.websocket import WebSocketProtocol
 
 
 class GunicornWorker(base.Worker):
+
+    http_protocol = HttpProtocol
+    websocket_protocol = WebSocketProtocol
 
     def __init__(self, *args, **kw):  # pragma: no cover
         super().__init__(*args, **kw)
@@ -46,37 +52,46 @@ class GunicornWorker(base.Worker):
 
     def run(self):
         is_debug = self.log.loglevel == logging.DEBUG
-        protocol = (WebSocketProtocol if self.app.callable.websocket_enabled
-                    else HttpProtocol)
+        protocol = (
+            self.websocket_protocol
+            if self.app.callable.websocket_enabled
+            else self.http_protocol
+        )
+
         self._server_settings = self.app.callable._helper(
             loop=self.loop,
             debug=is_debug,
             protocol=protocol,
             ssl=self.ssl_context,
-            run_async=True)
-        self._server_settings['signal'] = self.signal
-        self._server_settings.pop('sock')
-        trigger_events(self._server_settings.get('before_start', []),
-                       self.loop)
-        self._server_settings['before_start'] = ()
+            run_async=True,
+        )
+        self._server_settings["signal"] = self.signal
+        self._server_settings.pop("sock")
+        trigger_events(
+            self._server_settings.get("before_start", []), self.loop
+        )
+        self._server_settings["before_start"] = ()
 
         self._runner = asyncio.ensure_future(self._run(), loop=self.loop)
         try:
             self.loop.run_until_complete(self._runner)
             self.app.callable.is_running = True
-            trigger_events(self._server_settings.get('after_start', []),
-                           self.loop)
+            trigger_events(
+                self._server_settings.get("after_start", []), self.loop
+            )
             self.loop.run_until_complete(self._check_alive())
-            trigger_events(self._server_settings.get('before_stop', []),
-                           self.loop)
+            trigger_events(
+                self._server_settings.get("before_stop", []), self.loop
+            )
             self.loop.run_until_complete(self.close())
-        except:
+        except BaseException:
             traceback.print_exc()
         finally:
             try:
-                trigger_events(self._server_settings.get('after_stop', []),
-                               self.loop)
-            except:
+                trigger_events(
+                    self._server_settings.get("after_stop", []), self.loop
+                )
+            except BaseException:
                 traceback.print_exc()
             finally:
                 self.loop.close()
@@ -86,8 +101,11 @@ class GunicornWorker(base.Worker):
     async def close(self):
         if self.servers:
             # stop accepting connections
-            self.log.info("Stopping server: %s, connections: %s",
-                          self.pid, len(self.connections))
+            self.log.info(
+                "Stopping server: %s, connections: %s",
+                self.pid,
+                len(self.connections),
+            )
             for server in self.servers:
                 server.close()
                 await server.wait_closed()
@@ -101,8 +119,9 @@ class GunicornWorker(base.Worker):
             # gracefully shutdown timeout
             start_shutdown = 0
             graceful_shutdown_timeout = self.cfg.graceful_timeout
-            while self.connections and \
-                    (start_shutdown < graceful_shutdown_timeout):
+            while self.connections and (
+                start_shutdown < graceful_shutdown_timeout
+            ):
                 await asyncio.sleep(0.1)
                 start_shutdown = start_shutdown + 0.1
 
@@ -111,7 +130,7 @@ class GunicornWorker(base.Worker):
             coros = []
             for conn in self.connections:
                 if hasattr(conn, "websocket") and conn.websocket:
-                    coros.append(conn.websocket.close_connection(force=True))
+                    coros.append(conn.websocket.close_connection())
                 else:
                     conn.close()
             _shutdown = asyncio.gather(*coros, loop=self.loop)
@@ -143,8 +162,8 @@ class GunicornWorker(base.Worker):
                 if self.max_requests and req_count > self.max_requests:
                     self.alive = False
                     self.log.info(
-                            "Max requests exceeded, shutting down: %s", self
-                        )
+                        "Max requests exceeded, shutting down: %s", self
+                    )
                 elif pid == os.getpid() and self.ppid != os.getppid():
                     self.alive = False
                     self.log.info("Parent changed, shutting down: %s", self)
@@ -170,23 +189,29 @@ class GunicornWorker(base.Worker):
     def init_signals(self):
         # Set up signals through the event loop API.
 
-        self.loop.add_signal_handler(signal.SIGQUIT, self.handle_quit,
-                                     signal.SIGQUIT, None)
+        self.loop.add_signal_handler(
+            signal.SIGQUIT, self.handle_quit, signal.SIGQUIT, None
+        )
 
-        self.loop.add_signal_handler(signal.SIGTERM, self.handle_exit,
-                                     signal.SIGTERM, None)
+        self.loop.add_signal_handler(
+            signal.SIGTERM, self.handle_exit, signal.SIGTERM, None
+        )
 
-        self.loop.add_signal_handler(signal.SIGINT, self.handle_quit,
-                                     signal.SIGINT, None)
+        self.loop.add_signal_handler(
+            signal.SIGINT, self.handle_quit, signal.SIGINT, None
+        )
 
-        self.loop.add_signal_handler(signal.SIGWINCH, self.handle_winch,
-                                     signal.SIGWINCH, None)
+        self.loop.add_signal_handler(
+            signal.SIGWINCH, self.handle_winch, signal.SIGWINCH, None
+        )
 
-        self.loop.add_signal_handler(signal.SIGUSR1, self.handle_usr1,
-                                     signal.SIGUSR1, None)
+        self.loop.add_signal_handler(
+            signal.SIGUSR1, self.handle_usr1, signal.SIGUSR1, None
+        )
 
-        self.loop.add_signal_handler(signal.SIGABRT, self.handle_abort,
-                                     signal.SIGABRT, None)
+        self.loop.add_signal_handler(
+            signal.SIGABRT, self.handle_abort, signal.SIGABRT, None
+        )
 
         # Don't let SIGTERM and SIGUSR1 disturb active requests
         # by interrupting system calls

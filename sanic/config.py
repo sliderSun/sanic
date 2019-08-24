@@ -1,137 +1,50 @@
 import os
-import sys
-import syslog
-import platform
 import types
 
-from sanic.log import DefaultFilter
+from sanic.exceptions import PyFileError
+from sanic.helpers import import_string
 
-SANIC_PREFIX = 'SANIC_'
 
-_address_dict = {
-    'Windows': ('localhost', 514),
-    'Darwin': '/var/run/syslog',
-    'Linux': '/dev/log',
-    'FreeBSD': '/var/run/log'
+SANIC_PREFIX = "SANIC_"
+BASE_LOGO = """
+
+                 Sanic
+         Build Fast. Run Fast.
+
+"""
+
+DEFAULT_CONFIG = {
+    "REQUEST_MAX_SIZE": 100000000,  # 100 megabytes
+    "REQUEST_BUFFER_QUEUE_SIZE": 100,
+    "REQUEST_TIMEOUT": 60,  # 60 seconds
+    "RESPONSE_TIMEOUT": 60,  # 60 seconds
+    "KEEP_ALIVE": True,
+    "KEEP_ALIVE_TIMEOUT": 5,  # 5 seconds
+    "WEBSOCKET_MAX_SIZE": 2 ** 20,  # 1 megabytes
+    "WEBSOCKET_MAX_QUEUE": 32,
+    "WEBSOCKET_READ_LIMIT": 2 ** 16,
+    "WEBSOCKET_WRITE_LIMIT": 2 ** 16,
+    "GRACEFUL_SHUTDOWN_TIMEOUT": 15.0,  # 15 sec
+    "ACCESS_LOG": True,
+    "PROXIES_COUNT": -1,
+    "FORWARDED_FOR_HEADER": "X-Forwarded-For",
+    "REAL_IP_HEADER": "X-Real-IP",
 }
-
-LOGGING = {
-    'version': 1,
-    'disable_existing_loggers': False,
-    'filters': {
-        'accessFilter': {
-            '()': DefaultFilter,
-            'param': [0, 10, 20]
-        },
-        'errorFilter': {
-            '()': DefaultFilter,
-            'param': [30, 40, 50]
-        }
-    },
-    'formatters': {
-        'simple': {
-            'format': '%(asctime)s - (%(name)s)[%(levelname)s]: %(message)s',
-            'datefmt': '%Y-%m-%d %H:%M:%S'
-        },
-        'access': {
-            'format': '%(asctime)s - (%(name)s)[%(levelname)s][%(host)s]: ' +
-                      '%(request)s %(message)s %(status)d %(byte)d',
-            'datefmt': '%Y-%m-%d %H:%M:%S'
-        }
-    },
-    'handlers': {
-        'internal': {
-            'class': 'logging.StreamHandler',
-            'filters': ['accessFilter'],
-            'formatter': 'simple',
-            'stream': sys.stderr
-        },
-        'accessStream': {
-            'class': 'logging.StreamHandler',
-            'filters': ['accessFilter'],
-            'formatter': 'access',
-            'stream': sys.stderr
-        },
-        'errorStream': {
-            'class': 'logging.StreamHandler',
-            'filters': ['errorFilter'],
-            'formatter': 'simple',
-            'stream': sys.stderr
-        },
-        # before you use accessSysLog, be sure that log levels
-        # 0, 10, 20 have been enabled in you syslog configuration
-        # otherwise you won't be able to see the output in syslog
-        # logging file.
-        'accessSysLog': {
-            'class': 'logging.handlers.SysLogHandler',
-            'address': _address_dict.get(platform.system(),
-                                         ('localhost', 514)),
-            'facility': syslog.LOG_DAEMON,
-            'filters': ['accessFilter'],
-            'formatter': 'access'
-        },
-        'errorSysLog': {
-            'class': 'logging.handlers.SysLogHandler',
-            'address': _address_dict.get(platform.system(),
-                                         ('localhost', 514)),
-            'facility': syslog.LOG_DAEMON,
-            'filters': ['errorFilter'],
-            'formatter': 'simple'
-        },
-    },
-    'loggers': {
-        'sanic': {
-            'level': 'DEBUG',
-            'handlers': ['internal', 'errorStream']
-        },
-        'network': {
-            'level': 'DEBUG',
-            'handlers': ['accessStream', 'errorStream']
-        }
-    }
-}
-
-# this happens when using container or systems without syslog
-# keep things in config would cause file not exists error
-_addr = LOGGING['handlers']['accessSysLog']['address']
-if type(_addr) is str and not os.path.exists(_addr):
-    LOGGING['handlers'].pop('accessSysLog')
-    LOGGING['handlers'].pop('errorSysLog')
 
 
 class Config(dict):
-    def __init__(self, defaults=None, load_env=True, keep_alive=True):
-        super().__init__(defaults or {})
-        self.LOGO = """
-                 ▄▄▄▄▄
-        ▀▀▀██████▄▄▄       _______________
-      ▄▄▄▄▄  █████████▄  /                 \\
-     ▀▀▀▀█████▌ ▀▐▄ ▀▐█ |   Gotta go fast!  |
-   ▀▀█████▄▄ ▀██████▄██ | _________________/
-   ▀▄▄▄▄▄  ▀▀█▄▀█════█▀ |/
-        ▀▀▀▄  ▀▀███ ▀       ▄▄
-     ▄███▀▀██▄████████▄ ▄▀▀▀▀▀▀█▌
-   ██▀▄▄▄██▀▄███▀ ▀▀████      ▄██
-▄▀▀▀▄██▄▀▀▌████▒▒▒▒▒▒███     ▌▄▄▀
-▌    ▐▀████▐███▒▒▒▒▒▐██▌
-▀▄▄▄▄▀   ▀▀████▒▒▒▒▄██▀
-          ▀▀█████████▀
-        ▄▄██▀██████▀█
-      ▄██▀     ▀▀▀  █
-     ▄█             ▐▌
- ▄▄▄▄█▌              ▀█▄▄▄▄▀▀▄
-▌     ▐                ▀▀▄▄▄▀
- ▀▀▄▄▀
-"""
-        self.REQUEST_MAX_SIZE = 100000000  # 100 megabytes
-        self.REQUEST_TIMEOUT = 60  # 60 seconds
-        self.KEEP_ALIVE = keep_alive
-        self.WEBSOCKET_MAX_SIZE = 2 ** 20  # 1 megabytes
-        self.WEBSOCKET_MAX_QUEUE = 32
-        self.GRACEFUL_SHUTDOWN_TIMEOUT = 15.0  # 15 sec
+    def __init__(self, defaults=None, load_env=True, keep_alive=None):
+        defaults = defaults or {}
+        super().__init__({**DEFAULT_CONFIG, **defaults})
+
+        self.LOGO = BASE_LOGO
+
+        if keep_alive is not None:
+            self.KEEP_ALIVE = keep_alive
 
         if load_env:
-            self.load_environment_vars()
+            prefix = SANIC_PREFIX if load_env is True else load_env
+            self.load_environment_vars(prefix=prefix)
 
     def __getattr__(self, attr):
         try:
@@ -151,9 +64,10 @@ class Config(dict):
         """
         config_file = os.environ.get(variable_name)
         if not config_file:
-            raise RuntimeError('The environment variable %r is not set and '
-                               'thus configuration could not be loaded.' %
-                               variable_name)
+            raise RuntimeError(
+                "The environment variable %r is not set and "
+                "thus configuration could not be loaded." % variable_name
+            )
         return self.from_pyfile(config_file)
 
     def from_pyfile(self, filename):
@@ -162,15 +76,20 @@ class Config(dict):
 
         :param filename: an absolute path to the config file
         """
-        module = types.ModuleType('config')
+        module = types.ModuleType("config")
         module.__file__ = filename
         try:
             with open(filename) as config_file:
-                exec(compile(config_file.read(), filename, 'exec'),
-                     module.__dict__)
+                exec(  # nosec
+                    compile(config_file.read(), filename, "exec"),
+                    module.__dict__,
+                )
         except IOError as e:
-            e.strerror = 'Unable to load configuration file (%s)' % e.strerror
+            e.strerror = "Unable to load configuration file (%s)" % e.strerror
             raise
+        except Exception as e:
+            raise PyFileError(filename) from e
+
         self.from_object(module)
         return True
 
@@ -184,6 +103,9 @@ class Config(dict):
             from yourapplication import default_config
             app.config.from_object(default_config)
 
+            or also:
+            app.config.from_object('myproject.config.MyConfigClass')
+
         You should not use this function to load the actual configuration but
         rather configuration defaults. The actual config should be loaded
         with :meth:`from_pyfile` and ideally from a location not within the
@@ -191,22 +113,44 @@ class Config(dict):
 
         :param obj: an object holding the configuration
         """
+        if isinstance(obj, str):
+            obj = import_string(obj)
         for key in dir(obj):
             if key.isupper():
                 self[key] = getattr(obj, key)
 
-    def load_environment_vars(self):
+    def load_environment_vars(self, prefix=SANIC_PREFIX):
         """
-        Looks for any ``SANIC_`` prefixed environment variables and applies
+        Looks for prefixed environment variables and applies
         them to the configuration if present.
         """
         for k, v in os.environ.items():
-            if k.startswith(SANIC_PREFIX):
-                _, config_key = k.split(SANIC_PREFIX, 1)
+            if k.startswith(prefix):
+                _, config_key = k.split(prefix, 1)
                 try:
                     self[config_key] = int(v)
                 except ValueError:
                     try:
                         self[config_key] = float(v)
                     except ValueError:
-                        self[config_key] = v
+                        try:
+                            self[config_key] = strtobool(v)
+                        except ValueError:
+                            self[config_key] = v
+
+
+def strtobool(val):
+    """
+    This function was borrowed from distutils.utils. While distutils
+    is part of stdlib, it feels odd to use distutils in main application code.
+
+    The function was modified to walk its talk and actually return bool
+    and not int.
+    """
+    val = val.lower()
+    if val in ("y", "yes", "t", "true", "on", "1"):
+        return True
+    elif val in ("n", "no", "f", "false", "off", "0"):
+        return False
+    else:
+        raise ValueError("invalid truth value %r" % (val,))

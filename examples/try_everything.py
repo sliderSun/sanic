@@ -1,7 +1,7 @@
 import os
 
 from sanic import Sanic
-from sanic.log import log
+from sanic.log import logger as log
 from sanic import response
 from sanic.exceptions import ServerError
 
@@ -18,7 +18,7 @@ def test_sync(request):
     return response.json({"test": True})
 
 
-@app.route("/dynamic/<name>/<id:int>")
+@app.route("/dynamic/<name>/<i:int>")
 def test_params(request, name, i):
     return response.text("yeehaww {} {}".format(name, i))
 
@@ -66,7 +66,7 @@ def post_json(request):
 
 
 @app.route("/form")
-def post_json(request):
+def post_form_json(request):
     return response.json({"received": True, "form_data": request.form, "test": request.form.get('test')})
 
 

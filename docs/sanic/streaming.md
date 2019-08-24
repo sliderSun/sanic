@@ -2,7 +2,7 @@
 
 ## Request Streaming
 
-Sanic allows you to get request data by stream, as below. When the request ends, `request.stream.get()` returns `None`. Only post, put and patch decorator have stream argument.
+Sanic allows you to get request data by stream, as below. When the request ends, `await request.stream.read()` returns `None`. Only post, put and patch decorator have stream argument.
 
 ```python
 from sanic import Sanic
@@ -22,7 +22,7 @@ class SimpleView(HTTPMethodView):
     async def post(self, request):
         result = ''
         while True:
-            body = await request.stream.get()
+            body = await request.stream.read()
             if body is None:
                 break
             result += body.decode('utf-8')
@@ -33,29 +33,42 @@ class SimpleView(HTTPMethodView):
 async def handler(request):
     async def streaming(response):
         while True:
-            body = await request.stream.get()
+            body = await request.stream.read()
             if body is None:
                 break
             body = body.decode('utf-8').replace('1', 'A')
-            response.write(body)
+            await response.write(body)
     return stream(streaming)
 
 
 @bp.put('/bp_stream', stream=True)
-async def bp_handler(request):
+async def bp_put_handler(request):
     result = ''
     while True:
-        body = await request.stream.get()
+        body = await request.stream.read()
         if body is None:
             break
         result += body.decode('utf-8').replace('1', 'A')
     return text(result)
 
 
+# You can also use `bp.add_route()` with stream argument
+async def bp_post_handler(request):
+    result = ''
+    while True:
+        body = await request.stream.read()
+        if body is None:
+            break
+        result += body.decode('utf-8').replace('1', 'A')
+    return text(result)
+
+bp.add_route(bp_post_handler, '/bp_stream', methods=['POST'], stream=True)
+
+
 async def post_handler(request):
     result = ''
     while True:
-        body = await request.stream.get()
+        body = await request.stream.read()
         if body is None:
             break
         result += body.decode('utf-8')
@@ -85,8 +98,8 @@ app = Sanic(__name__)
 @app.route("/")
 async def test(request):
     async def sample_streaming_fn(response):
-        response.write('foo,')
-        response.write('bar')
+        await response.write('foo,')
+        await response.write('bar')
 
     return stream(sample_streaming_fn, content_type='text/csv')
 ```
@@ -100,7 +113,31 @@ async def index(request):
         conn = await asyncpg.connect(database='test')
         async with conn.transaction():
             async for record in conn.cursor('SELECT generate_series(0, 10)'):
-                response.write(record[0])
+                await response.write(record[0])
 
     return stream(stream_from_db)
+```
+
+If a client supports HTTP/1.1, Sanic will use [chunked transfer encoding](https://en.wikipedia.org/wiki/Chunked_transfer_encoding); you can explicitly enable or disable it using `chunked` option of the `stream` function.
+
+## File Streaming
+
+Sanic provides `sanic.response.file_stream` function that is useful when you want to send a large file. It returns a `StreamingHTTPResponse` object and will use chunked transfer encoding by default; for this reason Sanic doesn't add `Content-Length` HTTP header in the response. If you want to use this header, you can disable chunked transfer encoding and add it manually:
+
+```python
+from aiofiles import os as async_os
+from sanic.response import file_stream
+
+@app.route("/")
+async def index(request):
+    file_path = "/srv/www/whatever.png"
+
+    file_stat = await async_os.stat(file_path)
+    headers = {"Content-Length": str(file_stat.st_size)}
+
+    return await file_stream(
+        file_path,
+        headers=headers,
+        chunked=False,
+    )
 ```

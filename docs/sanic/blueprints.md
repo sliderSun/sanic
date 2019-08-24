@@ -48,19 +48,86 @@ by that blueprint. In this example, the registered routes in the `app.router`
 will look like:
 
 ```python
-[Route(handler=<function bp_root at 0x7f908382f9d8>, methods=None, pattern=re.compile('^/$'), parameters=[])]
+[Route(handler=<function bp_root at 0x7f908382f9d8>, methods=frozenset({'GET'}), pattern=re.compile('^/$'), parameters=[], name='my_blueprint.bp_root', uri='/')]
 ```
 
-## Using blueprints
+## Blueprint groups and nesting
 
-Blueprints have much the same functionality as an application instance.
+Blueprints may also be registered as part of a list or tuple, where the registrar will recursively cycle through any sub-sequences of blueprints and register them accordingly. The `Blueprint.group` method is provided to simplify this process, allowing a 'mock' backend directory structure mimicking what's seen from the front end. Consider this (quite contrived) example:
+
+```
+api/
+├──content/
+│  ├──authors.py
+│  ├──static.py
+│  └──__init__.py
+├──info.py
+└──__init__.py
+app.py
+```
+
+Initialization of this app's blueprint hierarchy could go as follows:
+
+```python
+# api/content/authors.py
+from sanic import Blueprint
+
+authors = Blueprint('content_authors', url_prefix='/authors')
+```
+```python
+# api/content/static.py
+from sanic import Blueprint
+
+static = Blueprint('content_static', url_prefix='/static')
+```
+```python
+# api/content/__init__.py
+from sanic import Blueprint
+
+from .static import static
+from .authors import authors
+
+content = Blueprint.group(static, authors, url_prefix='/content')
+```
+```python
+# api/info.py
+from sanic import Blueprint
+
+info = Blueprint('info', url_prefix='/info')
+```
+```python
+# api/__init__.py
+from sanic import Blueprint
+
+from .content import content
+from .info import info
+
+api = Blueprint.group(content, info, url_prefix='/api')
+```
+
+And registering these blueprints in `app.py` can now be done like so:
+
+```python
+# app.py
+from sanic import Sanic
+
+from .api import api
+
+app = Sanic(__name__)
+
+app.blueprint(api)
+```
+
+## Using Blueprints
+
+Blueprints have almost the same functionality as an application instance.
 
 ### WebSocket routes
 
 WebSocket handlers can be registered on a blueprint using the `@bp.websocket`
 decorator or `bp.add_websocket_route` method.
 
-### Middleware
+### Blueprint Middleware
 
 Using blueprints allows you to also register middleware globally.
 
@@ -78,6 +145,36 @@ async def halt_response(request, response):
 	return text('I halted the response')
 ```
 
+### Blueprint Group Middleware
+Using this middleware will ensure that you can apply a common middleware to all the blueprints that form the
+current blueprint group under consideration.
+
+```python
+bp1 = Blueprint('bp1', url_prefix='/bp1')
+bp2 = Blueprint('bp2', url_prefix='/bp2')
+
+@bp1.middleware('request')
+async def bp1_only_middleware(request):
+    print('applied on Blueprint : bp1 Only')
+
+@bp1.route('/')
+async def bp1_route(request):
+    return text('bp1')
+
+@bp2.route('/<param>')
+async def bp2_route(request, param):
+    return text(param)
+
+group = Blueprint.group(bp1, bp2)
+
+@group.middleware('request')
+async def group_middleware(request):
+    print('common middleware applied for both bp1 and bp2')
+    
+# Register Blueprint group under the app
+app.blueprint(group)
+```
+
 ### Exceptions
 
 Exceptions can be applied exclusively to blueprints globally.
@@ -93,7 +190,14 @@ def ignore_404s(request, exception):
 Static files can be served globally, under the blueprint prefix.
 
 ```python
-bp.static('/folder/to/serve', '/web/path')
+
+# suppose bp.name == 'bp'
+
+bp.static('/web/path', '/folder/to/serve')
+# also you can pass name parameter to it for url_for
+bp.static('/web/path', '/folder/to/server', name='uploads')
+app.url_for('static', name='bp.uploads', filename='file.txt') == '/bp/web/path/file.txt'
+
 ```
 
 ## Start and stop
@@ -127,7 +231,7 @@ async def close_connection(app, loop):
 Blueprints can be very useful for API versioning, where one blueprint may point
 at `/v1/<routes>`, and another pointing at `/v2/<routes>`.
 
-When a blueprint is initialised, it can take an optional `url_prefix` argument,
+When a blueprint is initialised, it can take an optional `version` argument,
 which will be prepended to all routes defined on the blueprint. This feature
 can be used to implement our API versioning scheme.
 
@@ -136,8 +240,8 @@ can be used to implement our API versioning scheme.
 from sanic.response import text
 from sanic import Blueprint
 
-blueprint_v1 = Blueprint('v1', url_prefix='/v1')
-blueprint_v2 = Blueprint('v2', url_prefix='/v2')
+blueprint_v1 = Blueprint('v1', url_prefix='/api', version="v1")
+blueprint_v2 = Blueprint('v2', url_prefix='/api', version="v2")
 
 @blueprint_v1.route('/')
 async def api_v1_root(request):
@@ -148,7 +252,7 @@ async def api_v2_root(request):
     return text('Welcome to version 2 of our documentation')
 ```
 
-When we register our blueprints on the app, the routes `/v1` and `/v2` will now
+When we register our blueprints on the app, the routes `/v1/api` and `/v2/api` will now
 point to the individual blueprints, which allows the creation of *sub-sites*
 for each API version.
 
@@ -158,8 +262,8 @@ from sanic import Sanic
 from blueprints import blueprint_v1, blueprint_v2
 
 app = Sanic(__name__)
-app.blueprint(blueprint_v1, url_prefix='/v1')
-app.blueprint(blueprint_v2, url_prefix='/v2')
+app.blueprint(blueprint_v1)
+app.blueprint(blueprint_v2)
 
 app.run(host='0.0.0.0', port=8000, debug=True)
 ```
@@ -172,7 +276,7 @@ takes the format `<blueprint_name>.<handler_name>`. For example:
 ```python
 @blueprint_v1.route('/')
 async def root(request):
-    url = app.url_for('v1.post_handler', post_id=5) # --> '/v1/post/5'
+    url = request.app.url_for('v1.post_handler', post_id=5) # --> '/v1/api/post/5'
     return redirect(url)
 
 
@@ -180,5 +284,3 @@ async def root(request):
 async def post_handler(request, post_id):
     return text('Post {} in Blueprint V1'.format(post_id))
 ```
-
-
